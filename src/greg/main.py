@@ -30,12 +30,19 @@ def show_list_by(delim: str, xs: list):
 show_list = partial(show_list_by, " ")
 
 # %%
+def isnumeric(s):
+    if s.startswith("-"):
+        return isnumeric(s[1:])
+    else:
+        return s.isnumeric() or (len((ts:=s.split("."))) <= 2 and all(t.isnumeric() for t in ts))
+
+# %%
 def show_float(x):
     return f"{x:.15f}"
 
 # %%
 def read_list(s):
-    return [[float(x) for x in l.split()] for l in s.split("\n")]
+    return [[float(x) if isnumeric(x) else x for x in l.split()] for l in s.split("\n")]
 
 # %%
 def mse_loss(weights, fwd, inputs, targets):
@@ -46,6 +53,10 @@ def sgd_solver(lr):
     def sgd_step(weights, grads):
         return weights - lr * grads
     return sgd_step
+
+# %%
+def linreg_weights(n_features, key):
+    return 1e-2 * mx.random.normal([n_features], key=key)
 
 # %%
 def linreg_forward(inputs, weights):
@@ -71,6 +82,52 @@ def ndims(xs):
             return 1 + ndims(x)
 
 # %%
+def unzip_data(dataset):
+    return dataset[:,:-1], dataset[:,-1]
+
+
+# %%
+def run_experiment(config):
+    train_inputs = config["train_inputs"]
+    train_targets = config["train_targets"]
+    test_inputs = config["test_inputs"]
+    test_targets = config["test_targets"]
+
+    seed = config["seed"]
+    n_samples = config["n_samples"]
+    n_features = config["n_features"]
+    n_iters = config["n_iters"]
+    lr = config["lr"]
+    make_weights = config["make_weights"]
+    forward = config["forward"]
+    loss_fn = config["loss_fn"]
+    make_solver = config["make_solver"]
+    solver_step = make_solver(lr)
+
+
+    key = mx.random.key(config["seed"])
+
+    key, subkey = mx.random.split(key)
+    weights = make_weights(n_features, subkey)
+
+    tic = time.perf_counter()
+    weights = solve(weights, forward, loss_fn, solver_step, train_inputs, train_targets, n_iters)
+    toc = time.perf_counter()
+
+    train_loss = loss_fn(weights, forward, train_inputs, train_targets).item()
+    throughput = (toc - tic) / n_iters
+    if test_inputs is not None and test_targets is not None:
+        test_loss = loss_fn(weights, forward, test_inputs, test_targets).item()
+    else:
+        test_loss = None
+    return {
+        "weights": weights,
+        "train_loss": train_loss,
+        "test_loss": test_loss,
+        "throughput": throughput
+    }
+
+# %%
 def main() -> None:
     parser = ArgumentParser(prog="greg",
                             description="greg, the gENERAL regRESSION program, applies linear regression to your dataset",
@@ -91,41 +148,53 @@ def main() -> None:
 
     slurped = sys.stdin.read().strip()
 
-    dataset = mx.array(read_list(slurped))
-    inputs = dataset[:,:-1]
-    targets = dataset[:,-1]
+    samples = read_list(slurped)
+    if samples[0][0] in ["train", "test"]:
+        train_samples = [sample[1:] for sample in samples if sample[0] == "train"]
+        test_samples = [sample[1:] for sample in samples if sample[0] == "test"]
 
-    seed = args.seed
-    n_samples = inputs.shape[0]; assert n_samples == targets.shape[0]
-    n_features = inputs.shape[-1]
-    n_iters = args.epochs
-    lr = 1e-2
-    forward = linreg_forward
-    loss_fn = mse_loss
-    solver_step = sgd_solver(lr)
+        train_inputs, train_targets = unzip_data(mx.array(train_samples))
+        test_inputs, test_targets = unzip_data(mx.array(test_samples))
+    else:
+        train_inputs, train_targets = unzip_data(mx.array(samples))
+        test_inputs, test_targets = None, None
 
-    key = mx.random.key(seed)
+    config = {
+        "train_inputs": train_inputs,
+        "train_targets": train_targets,
+        "test_inputs": test_inputs,
+        "test_targets": test_targets,
+        "seed": args.seed,
+        "n_samples": train_inputs.shape[0],
+        "n_features": train_inputs.shape[-1],
+        "n_iters": args.epochs,
+        "lr": 1e-2,
+        "forward": linreg_forward,
+        "make_weights": linreg_weights,
+        "loss_fn": mse_loss,
+        "make_solver": sgd_solver
+    }
 
-    # construct initial random weights
-    key, subkey = mx.random.split(key)
-    weights = 1e-2 * mx.random.normal([n_features], key=subkey)
-
-    tic = time.perf_counter()
-    weights = solve(weights, forward, loss_fn, solver_step, inputs, targets, n_iters) # train the regression model
-    toc = time.perf_counter()
+    results = run_experiment(config)
+    weights = results["weights"]
+    train_loss = results["train_loss"]
+    test_loss = results["test_loss"]
+    throughput = results["throughput"]
 
     if args.all:
-        loss = loss_fn(weights, forward, inputs, targets).item()
-        throughput = n_iters / (toc - tic)
-        print("loss", show_float(loss))
-        print("throughput", show_float(throughput)) # it/s
+        print("train/loss", show_float(train_loss))
+        print("train/throughput", show_float(throughput))
+        if test_loss is not None:
+            print("test/loss", show_float(test_loss))
     print(show_list(weights.tolist()))
 
 # TODO:
 # - [ ] feat: add int support to read_list()
+# - [ ] feat: add support to parsing scientific notation
 # - [ ] feat: add support for multiple output dimensions
 # - [ ] feat: stop copy-pasting code from `xyn`
-# - [ ] feat: add support for train/test sets
+# - [x] feat: add support for train/test sets
+# - [x] feat: add experiment launcher
 # - [ ] feat: add support for reading data from a file
 # - [ ] feat: optimize solve() via jit compilation
 # - [ ] feat: add logging for entire solving process
